@@ -1,0 +1,106 @@
+#!/usr/bin/env bash
+# Image tests, run by docker-image-refresh after building a new image and
+# before tagging it 'latest'. Usage: ./test <image>
+
+# The check functions are called indirectly, through 'check'
+# shellcheck disable=SC2329
+
+set -euo pipefail
+
+if [ $# -ne 1 ]; then
+    echo "Usage: $0 <image>" >&2
+    exit 2
+fi
+IMAGE=$1
+
+REPO_DIR=$(dirname "$0")
+PYTHON=/opt/virtualenv/bin/python
+FAILED=0
+CONTAINER="sungather-test-$$"
+
+# No inverter answers on localhost, but SunGather still loads its registers
+# and exports, and starts its webserver
+CONFIG='inverter:
+  host: 127.0.0.1
+  connection: modbus
+exports:
+  - name: webserver
+    enabled: True'
+
+cleanup() {
+    docker rm --force "$CONTAINER" >/dev/null 2>&1 || true
+}
+trap cleanup EXIT
+
+check() {
+    local name=$1 output
+    shift
+    if output=$("$@" 2>&1); then
+        echo "PASS: $name"
+    else
+        echo "FAIL: $name"
+        [ -z "$output" ] || echo "    ${output//$'\n'/$'\n'    }"
+        FAILED=1
+    fi
+}
+
+in_image() {
+    docker run --rm "$IMAGE" "$@"
+}
+
+runs_as_sungather() {
+    local user
+    user=$(in_image id -un) || return 1
+    [ "$user" = "sungather" ] || { echo "Runs as '$user'"; return 1; }
+}
+
+imports_dependencies() {
+    in_image "$PYTHON" -c 'import yaml, paho.mqtt.client, requests, influxdb_client, SungrowClient.SungrowClient'
+}
+
+has_patched_sungrowclient() {
+    local path
+    path=$(in_image "$PYTHON" -c 'import SungrowClient.SungrowClient as m; print(m.__file__)') || return 1
+    in_image cat "$path" | cmp - "$REPO_DIR/patch/SungrowClient.py"
+}
+
+starts() {
+    docker run --detach --name "$CONTAINER" "$IMAGE" sh -c \
+        'printf "%s\n" "$0" > /tmp/config.yaml && exec '"$PYTHON"' sungather.py -c /tmp/config.yaml -l /tmp/' \
+        "$CONFIG" >/dev/null
+}
+
+serves_webpage() {
+    local page
+    for _ in {1..30}; do
+        if page=$(docker exec "$CONTAINER" "$PYTHON" -c \
+            'import urllib.request; print(urllib.request.urlopen("http://localhost:8080/", timeout=3).read().decode())' 2>/dev/null); then
+            grep -q '<title>SunGather</title>' <<<"$page" && return 0
+            echo "$page" | head -20
+            return 1
+        fi
+        sleep 2
+    done
+    docker logs --tail 20 "$CONTAINER"
+    return 1
+}
+
+# Fails when Debian's repositories can't be reached, as well as when
+# packages are out of date
+packages_up_to_date() {
+    local output
+    output=$(docker run --rm --user root "$IMAGE" sh -c \
+        'apt-get update -qq --error-on=any && apt-get -s -q --with-new-pkgs upgrade' 2>&1) \
+        || { echo "$output"; return 1; }
+    ! grep '^Inst ' <<<"$output"
+}
+
+echo "Testing '$IMAGE' ..."
+check "runs as the sungather user" runs_as_sungather
+check "Python dependencies import" imports_dependencies
+check "patched SungrowClient is installed" has_patched_sungrowclient
+check "container starts" starts
+check "serves its web page without an inverter" serves_webpage
+check "Debian packages are up to date" packages_up_to_date
+
+exit $FAILED
