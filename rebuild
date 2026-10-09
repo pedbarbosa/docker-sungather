@@ -1,11 +1,23 @@
 #!/usr/bin/env bash
+set -euo pipefail
 
-if [ -d ../docker-rebuild ]; then
-    echo "Checking if 'docker-rebuild' is up-to-date ..."
-    git -C ../docker-rebuild pull
-else
-    echo "Cloning 'docker-rebuild' from Gist ..."
-    git clone git@gist.github.com:6232d24e44ef62949fb00339a44ca808.git ../docker-rebuild
+REFRESH=/usr/local/bin/docker-image-refresh
+GIST_URL=https://gist.githubusercontent.com/pedbarbosa/5a6ea23c8bcaf90f063eb0a082277d79/raw/docker-image-refresh.sh
+
+if [ ! -x "$REFRESH" ]; then
+    cat >&2 <<EOF
+ERROR: '$REFRESH' not found!
+
+Install it from its gist as root, then run this script again:
+
+    sudo curl -fsSL $GIST_URL -o $REFRESH
+    sudo chmod 755 $REFRESH
+
+Run the same commands to update it.
+EOF
+    exit 1
 fi
 
-../docker-rebuild/rebuild.sh
+# docker-image-refresh builds the 'docker-*' directory it's run from
+cd "$(dirname "$0")"
+exec "$REFRESH"
