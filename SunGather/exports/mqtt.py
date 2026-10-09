@@ -85,9 +85,11 @@ class export_mqtt(object):
             if not self.mqtt_client.is_connected():
                 logging.warning(f'MQTT: Server Disconnected; {self.mqtt_queue.__len__()} messages queued, will automatically attempt to reconnect')
         except Exception as err:
-            logging.warning(f'MQTT: {self.mqtt_queue.__len__()} messages queued.')
-            logging.warning(f'MQTT: Server Error: {err}')
-            return False
+            logging.error(f'MQTT: Server Error: {err}')
+            # instead of returning False, program will exit and autoheal should restart the container
+            # return False
+            logging.error('Unhandled MQTT exception, Sungather exiting!')
+            exit()
         # qos=0 is set, so no acknowledgment is sent, rending this check useless
         #elif self.mqtt_queue.__len__() > 10:
         #    logging.warning(f'MQTT: {self.mqtt_queue.__len__()} messages queued, this may be due to a MQTT server issue')
