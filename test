@@ -17,18 +17,33 @@ REPO_DIR=$(dirname "$0")
 PYTHON=/opt/virtualenv/bin/python
 FAILED=0
 CONTAINER="sungather-test-$$"
+WAITING_CONTAINER="sungather-test-waiting-$$"
 
-# No inverter answers on localhost, but SunGather still loads its registers
-# and exports, and starts its webserver
+# No inverter answers on localhost, but with its model and serial number set
+# SunGather still loads its registers and exports, and starts its webserver
 CONFIG='inverter:
   host: 127.0.0.1
   connection: modbus
+  model: SG5K-D
+  serial: TEST
+  scan_interval: 5
+exports:
+  - name: webserver
+    enabled: True'
+
+# Without them, SunGather has to wait for the inverter to detect them, and
+# mustn't load its exports meanwhile
+WAITING_CONFIG='inverter:
+  host: 127.0.0.1
+  connection: modbus
+  scan_interval: 5
+  log_console: INFO
 exports:
   - name: webserver
     enabled: True'
 
 cleanup() {
-    docker rm --force "$CONTAINER" >/dev/null 2>&1 || true
+    docker rm --force "$CONTAINER" "$WAITING_CONTAINER" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
 
@@ -64,10 +79,36 @@ has_patched_sungrowclient() {
     in_image cat "$path" | cmp - "$REPO_DIR/patch/SungrowClient.py"
 }
 
-starts() {
-    docker run --detach --name "$CONTAINER" "$IMAGE" sh -c \
+start_container() {
+    docker run --detach --name "$1" "$IMAGE" sh -c \
         'printf "%s\n" "$0" > /tmp/config.yaml && exec '"$PYTHON"' sungather.py -c /tmp/config.yaml -l /tmp/' \
-        "$CONFIG" >/dev/null
+        "$2" >/dev/null
+}
+
+starts() {
+    start_container "$CONTAINER" "$CONFIG"
+}
+
+# Polls the image's healthcheck rather than waiting for Docker to run it
+passes_healthcheck() {
+    for _ in {1..15}; do
+        docker exec "$1" healthcheck && return 0
+        sleep 2
+    done
+    docker logs --tail 20 "$1"
+    return 1
+}
+
+healthy_without_inverter() {
+    passes_healthcheck "$CONTAINER"
+}
+
+waits_for_inverter() {
+    start_container "$WAITING_CONTAINER" "$WAITING_CONFIG" || return 1
+    passes_healthcheck "$WAITING_CONTAINER" || return 1
+    docker logs "$WAITING_CONTAINER" 2>&1 | grep -q 'Inverter is not answering' \
+        || { docker logs --tail 20 "$WAITING_CONTAINER"; return 1; }
+    ! docker logs "$WAITING_CONTAINER" 2>&1 | grep 'Loading Export'
 }
 
 serves_webpage() {
@@ -89,7 +130,8 @@ serves_webpage() {
 # packages are out of date
 packages_up_to_date() {
     local output
-    output=$(docker run --rm --user root "$IMAGE" sh -c \
+    # Passes on the proxy settings where there's one, as in the devcontainer
+    output=$(docker run --rm --user root -e http_proxy -e https_proxy "$IMAGE" sh -c \
         'apt-get update -qq --error-on=any && apt-get -s -q --with-new-pkgs upgrade' 2>&1) \
         || { echo "$output"; return 1; }
     ! grep '^Inst ' <<<"$output"
@@ -101,6 +143,8 @@ check "Python dependencies import" imports_dependencies
 check "patched SungrowClient is installed" has_patched_sungrowclient
 check "container starts" starts
 check "serves its web page without an inverter" serves_webpage
+check "passes its healthcheck without an inverter" healthy_without_inverter
+check "waits for the inverter to detect its model" waits_for_inverter
 check "Debian packages are up to date" packages_up_to_date
 
 exit $FAILED

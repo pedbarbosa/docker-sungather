@@ -82,14 +82,12 @@ class export_mqtt(object):
 
     def publish(self, inverter):
         try:
-            if not self.mqtt_client.is_connected():
+            connected = self.mqtt_client.is_connected()
+            if not connected:
                 logging.warning(f'MQTT: Server Disconnected; {self.mqtt_queue.__len__()} messages queued, will automatically attempt to reconnect')
         except Exception as err:
-            logging.error(f'MQTT: Server Error: {err}')
-            # instead of returning False, program will exit and autoheal should restart the container
-            # return False
-            logging.error('Unhandled MQTT exception, Sungather exiting!')
-            exit()
+            logging.warning(f'MQTT: Server Error; Server not configured')
+            return False
         # qos=0 is set, so no acknowledgment is sent, rending this check useless
         #elif self.mqtt_queue.__len__() > 10:
         #    logging.warning(f'MQTT: {self.mqtt_queue.__len__()} messages queued, this may be due to a MQTT server issue')
@@ -135,4 +133,5 @@ class export_mqtt(object):
         self.mqtt_queue.append(self.mqtt_client.publish(self.mqtt_config['topic'], payload, qos=0).mid)
         logging.info(f"MQTT: Registers Published")
 
-        return True
+        # False keeps the container healthcheck from passing until paho reconnects
+        return connected

@@ -1,0 +1,7 @@
+#!/bin/sh
+# Docker healthcheck: healthy until the deadline that SunGather's polling loop
+# keeps pushing forward while it runs and its exports publish (see
+# mark_healthy in sungather.py)
+
+deadline=$(cat /tmp/sungather.healthy 2>/dev/null) || exit 1
+[ "$(date +%s)" -lt "$deadline" ]
