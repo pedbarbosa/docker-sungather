@@ -9,6 +9,7 @@ from datetime import datetime
 
 import logging
 import logging.handlers
+import socket
 import time
 
 class SungrowClient():
@@ -89,6 +90,15 @@ class SungrowClient():
             logging.info(f'Modbus client is not connected, attempting to reconnect')
             return self.connect()
 
+    # Checks the inverter accepts connections, without the errors pymodbus logs
+    # for every failed attempt while it's off
+    def isReachable(self):
+        try:
+            with socket.create_connection((self.client_config['host'], int(self.client_config['port'])), timeout=self.client_config['timeout']):
+                return True
+        except OSError:
+            return False
+
     def close(self):
         logging.info("Closing Session: " + str(self.client))
         try: self.client.close()
@@ -100,7 +110,9 @@ class SungrowClient():
         except: pass
         self.client = None
 
-    def configure_registers(self,registersfile):
+    # Returns False when the inverter didn't answer, so detection can be retried
+    # once it's back. Carrying on without a model loads the wrong registers.
+    def detect_model_and_serial(self, registersfile):
         # Check model so we can load only valid registers
         if self.inverter_config.get('model'):
             logging.info(f"Bypassing Model Detection, Using config: {self.inverter_config.get('model')}")
@@ -110,15 +122,16 @@ class SungrowClient():
                 if register.get('name') == "device_type_code":
                     register['type'] = "read"
                     self.registers.append(register)
-                    if self.load_registers(register['type'], register['address'] -1, 1): # Needs to be address -1
-                        if isinstance(self.latest_scrape.get('device_type_code'),int):
-                            logging.warning(f"Unknown Type Code Detected: {self.latest_scrape.get('device_type_code')}")
-                        else:
-                            self.inverter_config['model'] = self.latest_scrape.get('device_type_code')
-                            logging.info(f"Detected Model: {self.inverter_config.get('model')}")
-                    else:
-                        logging.info(f'Model detection failed, please set model in config.py')
+                    answered = self.load_registers(register['type'], register['address'] -1, 1) # Needs to be address -1
                     self.registers.pop()
+                    if not answered:
+                        logging.info(f'Model detection failed, inverter did not answer')
+                        return False
+                    if isinstance(self.latest_scrape.get('device_type_code'),int):
+                        logging.warning(f"Unknown Type Code Detected: {self.latest_scrape.get('device_type_code')}")
+                    else:
+                        self.inverter_config['model'] = self.latest_scrape.get('device_type_code')
+                        logging.info(f"Detected Model: {self.inverter_config.get('model')}")
                     break
 
         if self.inverter_config.get('serial_number'):
@@ -129,17 +142,20 @@ class SungrowClient():
                 if register.get('name') == "serial_number":
                     register['type'] = "read"
                     self.registers.append(register)
-                    if self.load_registers(register['type'], register['address'] -1, 10): # Needs to be address -1
-                        if isinstance(self.latest_scrape.get('serial_number'),int):
-                            logging.warning(f"Unknown Type Code Detected: {self.latest_scrape.get('serial_number')}")
-                        else:
-                            self.inverter_config['serial_number'] = self.latest_scrape.get('serial_number')
-                            logging.info(f"Detected Serial: {self.inverter_config.get('serial_number')}")
-                    else:
-                        logging.info(f'Serial detection failed, please set serial number in config.py')
+                    answered = self.load_registers(register['type'], register['address'] -1, 10) # Needs to be address -1
                     self.registers.pop()
+                    if not answered:
+                        logging.info(f'Serial detection failed, inverter did not answer')
+                        return False
+                    if isinstance(self.latest_scrape.get('serial_number'),int):
+                        logging.warning(f"Unknown Type Code Detected: {self.latest_scrape.get('serial_number')}")
+                    else:
+                        self.inverter_config['serial_number'] = self.latest_scrape.get('serial_number')
+                        logging.info(f"Detected Serial: {self.inverter_config.get('serial_number')}")
                     break
+        return True
 
+    def configure_registers(self,registersfile):
         # Load register list based on name and value after checking model
         for register in registersfile['registers'][0]['read']:
             if register.get('level',3) <= self.inverter_config.get('level') or self.inverter_config.get('level') == 3:

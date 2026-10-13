@@ -39,6 +39,12 @@ VOLUME /logs
 VOLUME /config
 COPY SunGather/config-example.yaml /config/config.yaml
 
+COPY healthcheck /usr/local/bin/
+
 USER sungather
+
+# While the inverter is off SunGather keeps marking itself healthy, so the
+# start period only has to cover detecting the inverter and the first scrape
+HEALTHCHECK --interval=1m --timeout=10s --start-period=3m --retries=3 CMD [ "healthcheck" ]
 
 CMD [ "/opt/virtualenv/bin/python", "sungather.py", "-c", "/config/config.yaml", "-l", "/logs/" ]

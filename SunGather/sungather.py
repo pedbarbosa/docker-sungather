@@ -89,6 +89,7 @@ def main():
         "scan_interval": configfile['inverter'].get('scan_interval',30),
         "connection": configfile['inverter'].get('connection',"modbus"),
         "model": configfile['inverter'].get('model',None),
+        "serial_number": configfile['inverter'].get('serial',None),
         "smart_meter": configfile['inverter'].get('smart_meter',False),
         "use_local_time": configfile['inverter'].get('use_local_time',False),
         "log_console": configfile['inverter'].get('log_console','WARNING'),
@@ -112,8 +113,8 @@ def main():
             logging.warning(f"log_file: Valid options are: DEBUG, INFO, WARNING, ERROR and OFF")
 
     logging.info(f"Logging to console set to: {logging.getLevelName(logger.handlers[0].level)}")
-    if logger.handlers.__len__() == 3:
-        logging.info(f"Logging to file set to: {logging.getLevelName(logger.handlers[2].level)}")
+    if logger.handlers.__len__() == 2:
+        logging.info(f"Logging to file set to: {logging.getLevelName(logger.handlers[1].level)}")
     
     logging.debug(f'Inverter Config Loaded: {config_inverter}')    
 
@@ -126,6 +127,17 @@ def main():
     if not inverter.checkConnection():
         logging.error(f"Error: Connection to inverter failed: {config_inverter.get('host')}:{config_inverter.get('port')}")
         sys.exit(f"Error: Connection to inverter failed: {config_inverter.get('host')}:{config_inverter.get('port')}")       
+
+    scan_interval = config_inverter.get('scan_interval')
+
+    signal.signal(signal.SIGTERM, handle_sigterm)
+
+    # The registers and exports need the model and serial number, so wait for
+    # the inverter if it's off, e.g. when the container starts before sunrise
+    while not inverter.detect_model_and_serial(registersfile):
+        inverter.disconnect()
+        wait_for_inverter(inverter, scan_interval)
+        inverter.checkConnection()
 
     inverter.configure_registers(registersfile)
     if not inverter.inverter_config['connection'] == "http": inverter.close()
@@ -141,12 +153,10 @@ def main():
                     exports.append(getattr(export_load, "export_" + export.get('name'))())
                     retval = exports[-1].configure(export, inverter)
             except Exception as err:
+                # Exit rather than run with a half configured export that fails on every publish
                 logging.error(f"Failed loading export: {err}" +
                             f"\n\t\t\t     Please make sure {export.get('name')}.py exists in the exports folder")
-
-    scan_interval = config_inverter.get('scan_interval')
-
-    signal.signal(signal.SIGTERM, handle_sigterm)
+                sys.exit(f"Failed loading export: {export.get('name')}")
 
     # Core polling loop
     while True:
@@ -162,9 +172,14 @@ def main():
             success = False
 
         if(success):
+            published = True
             for export in exports:
-                export.publish(inverter)
+                if not export.publish(inverter):
+                    published = False
             if not inverter.inverter_config['connection'] == "http": inverter.close()
+            # Only while every export publishes, so the healthcheck fails when one stays broken
+            if published:
+                mark_healthy(scan_interval)
         else:
             inverter.disconnect()
             logging.warning(f"Data collection failed, skipped exporting data. Retying in {scan_interval} secs")
@@ -175,7 +190,11 @@ def main():
 
         if 'runonce' in locals():
             sys.exit(0)
-        
+
+        if not success:
+            wait_for_inverter(inverter, scan_interval)
+            continue
+
         # Sleep until the next scan
         if scan_interval - process_time <= 1:
             logging.warning(f"SunGather is taking {process_time} to process, which is longer than interval {scan_interval}, Please increase scan interval")
@@ -189,15 +208,40 @@ def handle_sigterm(signum, frame):
     # Perform any cleanup here
     exit(0)
 
+# Waits a scan interval after a failed scrape. The inverter turns itself off
+# when there's no PV power, so if it isn't accepting connections, keep waiting
+# until it is, without logging every attempt. Failures while it is accepting
+# them don't mark the container healthy, so it's restarted if they persist.
+def wait_for_inverter(inverter, scan_interval):
+    time.sleep(scan_interval)
+    if inverter.isReachable():
+        return
+    logging.warning(f"Inverter is not answering, as expected when there's no PV power. Checking every {scan_interval} secs until it's back")
+    offline_start = time.time()
+    while True:
+        mark_healthy(scan_interval)
+        time.sleep(scan_interval)
+        if inverter.isReachable():
+            break
+    logging.info(f"Inverter is accepting connections again after {int((time.time() - offline_start) / 60)} mins")
+
+# The container's healthcheck passes until the deadline written here, so it
+# fails once the polling loop stops coming back, whether hung or failing to export
+def mark_healthy(scan_interval):
+    try:
+        with open(HEALTH_FILE, 'w') as f:
+            f.write(str(int(time.time() + max(5 * scan_interval, 300))))
+    except OSError as err:
+        logging.debug(f"Failed to write {HEALTH_FILE}: {err}")
+
+HEALTH_FILE = '/tmp/sungather.healthy'
+
 logging.basicConfig(
     format='%(asctime)s %(levelname)-8s %(message)s',
     level=logging.DEBUG,
     datefmt='%Y-%m-%d %H:%M:%S')
 
 logger = logging.getLogger('')
-ch = logging.StreamHandler()
-ch.setLevel(logging.WARNING)
-logger.addHandler(ch)
 
 if __name__== "__main__":
     main()
