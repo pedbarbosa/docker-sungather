@@ -13,8 +13,8 @@ name: Publish image
 # 'patch'.
 on:
   schedule:
-    # Daily at 04:33 in Brisbane, staggered with the other docker-* repos to publish by 05:00
-    - cron: "33 4 * * *"
+    # Daily at 00:05 in Brisbane
+    - cron: "05 0 * * *"
       timezone: "Australia/Brisbane"
   workflow_dispatch:
     inputs:
