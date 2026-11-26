@@ -149,8 +149,12 @@ class export_pvoutput(object):
 
         return True
 
+    # Returns False when collecting or uploading fails, so the container
+    # healthcheck fails if PVOutput stays broken, as with the other exports
     def publish(self, inverter):
+        published = False
         if self.collect_data(inverter):
+            published = True
             # Process data points every status_interval
             if self.next_publish <= datetime.datetime.now():
                 any_data = False
@@ -211,6 +215,7 @@ class export_pvoutput(object):
                         if response.status_code != requests.codes.ok:
                             logging.error(f"PVOutput: Upload Failed; {str(response.status_code)} Message; {str(response.text)}")
                             logging.error("PVOutput: Request; " + self.url_addbatchstatus + ", " + str(self.headers) + " : " + str(payload))
+                            published = False
                         else:
                             self.batch_data = []
                             self.next_publish = self.get_next_target_time(self.status_interval)
@@ -218,6 +223,7 @@ class export_pvoutput(object):
                     except Exception as err:
                         logging.error(f"PVOutput: Failed to Upload")
                         logging.debug(f"{err}")
+                        published = False
                 else:
                     logging.info("PVOutput: Data added to next batch upload")
             else:
@@ -225,6 +231,8 @@ class export_pvoutput(object):
                 logging.info("PVOutput: Data logged, next upload in %s secs", int(next_upload_delta.total_seconds()))
 
             self.last_run = time.time()
+
+        return published
 
     def get_next_target_time(self, interval, delay=0):
         """Calculate the next time that we should send an update to pvoutput.

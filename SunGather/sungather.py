@@ -146,17 +146,28 @@ def main():
     exports = []
     if configfile.get('exports'):
         for export in configfile.get('exports'):
+            if not export.get('enabled', False):
+                continue
+            # Exit rather than run without an enabled export, or with a half
+            # configured one that fails on every publish
             try:
-                if export.get('enabled', False):
-                    export_load = importlib.import_module("exports." + export.get('name'))
-                    logging.info(f"Loading Export: exports {export.get('name')}")
-                    exports.append(getattr(export_load, "export_" + export.get('name'))())
-                    retval = exports[-1].configure(export, inverter)
-            except Exception as err:
-                # Exit rather than run with a half configured export that fails on every publish
-                logging.error(f"Failed loading export: {err}" +
-                            f"\n\t\t\t     Please make sure {export.get('name')}.py exists in the exports folder")
+                export_load = importlib.import_module("exports." + export.get('name'))
+            except ModuleNotFoundError as err:
+                if err.name == "exports." + str(export.get('name')):
+                    logging.error(f"Failed loading export: {err}" +
+                                f"\n\t\t\t     Please make sure {export.get('name')}.py exists in the exports folder")
+                else:
+                    logging.error(f"Failed loading export {export.get('name')}: {err}" +
+                                f"\n\t\t\t     Please make sure requirements are installed: pip install -r requirements.txt")
                 sys.exit(f"Failed loading export: {export.get('name')}")
+            try:
+                logging.info(f"Loading Export: exports {export.get('name')}")
+                export_class = getattr(export_load, "export_" + export.get('name'))()
+                retval = export_class.configure(export, inverter)
+                exports.append(export_class)
+            except Exception as err:
+                logging.exception(f"Failed configuring export {export.get('name')}: {err}")
+                sys.exit(f"Failed configuring export: {export.get('name')}")
 
     # Core polling loop
     while True:
@@ -174,7 +185,13 @@ def main():
         if(success):
             published = True
             for export in exports:
-                if not export.publish(inverter):
+                # One failing export should not stop the others or kill the
+                # polling loop, but it still counts as a failed publish
+                try:
+                    if not export.publish(inverter):
+                        published = False
+                except Exception as err:
+                    logging.exception(f"Failed publishing to {type(export).__name__}: {err}")
                     published = False
             if not inverter.inverter_config['connection'] == "http": inverter.close()
             # Only while every export publishes, so the healthcheck fails when one stays broken
